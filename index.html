@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="nl">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BioSnake · Live duel</title>
+<style>
+:root{color-scheme:dark;--bg:#101918;--panel:#192925;--line:#40584e;--lime:#c8fa79;--purple:#d4acff;--ink:#f1f6eb;--muted:#b6c9bd}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px system-ui,sans-serif}main{max-width:1120px;padding:24px clamp(12px,4vw,40px);margin:auto}header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}h1{font-size:clamp(32px,6vw,55px);letter-spacing:-.075em;margin:0}h1 span,.tag{color:var(--lime)}.tag{font:700 13px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em}h2{margin:4px 0 10px;font-size:22px;line-height:1.15;overflow-wrap:anywhere}p{margin:7px 0 12px;line-height:1.4;color:var(--muted)}.layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:15px;align-items:start}.panel,.arena{border:1px solid var(--line);border-radius:16px;background:var(--panel)}.panel{padding:16px;margin-bottom:12px}.arena{overflow:hidden}.bar,.scoreboard{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px}.scoreboard{min-height:76px}.scoreboard div{min-width:0;overflow-wrap:anywhere}.scoreboard div:last-child{text-align:right}.scoreboard strong{display:block}.scoreboard small,.bar{color:var(--muted)}.clock{font:700 19px ui-monospace,monospace;color:var(--ink);white-space:nowrap}canvas{width:100%;display:block;aspect-ratio:24/15;background:#101d19}button,input{font:inherit;border-radius:8px;padding:9px 10px;color:var(--ink);border:1px solid #627a6c;background:#233730;min-width:0}button{cursor:pointer}button:hover{border-color:var(--lime)}button:disabled{opacity:.55;cursor:default}.primary{color:#162216;background:var(--lime);font-weight:750}.stack{display:grid;gap:8px}.stack button{text-align:left}label{display:grid;gap:4px;font-size:13px}.room{font:700 29px ui-monospace,monospace;letter-spacing:.12em;color:var(--lime);user-select:all}.error{color:#ffadba}button:focus-visible,input:focus-visible{outline:2px solid var(--lime);outline-offset:2px}[hidden]{display:none!important}@media(max-width:710px){.layout{grid-template-columns:1fr}}
+</style>
+<main>
+<header><h1>Bio<span>Snake</span></h1><span class="tag">Live duel</span></header>
+<div class="layout">
+<section class="arena" aria-label="Gedeeld speelveld">
+<div class="scoreboard" id="scoreboard"></div>
+<canvas id="field" width="720" height="450" aria-label="Speelveld"></canvas>
+<div class="bar"><span>Stuur met de pijltjestoetsen of WASD</span><span class="clock" id="clock">3:00</span></div>
+</section>
+<aside>
+<section class="panel" id="welcome">
+<h2>Speel op twee Chromebooks</h2>
+<form class="stack" id="lobby">
+<label>Je naam<input id="name" required maxlength="24" autocomplete="off"></label>
+<button class="primary" name="action" value="create">Maak een kamer</button>
+<label>Kamercode van je tegenstander<input id="code" maxlength="6" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+<button name="action" value="join">Doe mee</button>
+</form>
+</section>
+<section class="panel" id="room" hidden>
+<div class="tag">Kamercode</div><div id="roomCode" class="room"></div>
+</section>
+<section class="panel" id="message" hidden aria-labelledby="title">
+<div class="tag" id="tag"></div><h2 id="title"></h2><p id="description"></p>
+<div class="stack" id="actions"></div>
+</section>
+<p id="notice" class="error" role="status"></p>
+</aside>
+</div>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const ctx=$('field').getContext('2d');
+const colors=['#c8fa79','#d4acff'];
+const keys={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',w:'up',s:'down',a:'left',d:'right'};
+let session=null,state=null,busy=false,renderKey='',queued=null;
+try { session=JSON.parse(sessionStorage.getItem('biosnake-live')); } catch {}
+
+async function send(action, extras={}){
+  if(busy){
+    if(action!=='state') queued={action,extras};
+    return;
+  }
+  busy=true;
+  try{
+    const response=await fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({...session,...extras,action}),signal:AbortSignal.timeout(3500)});
+    const data=await response.json();
+    if(!response.ok){
+      if(response.status===400&&data.error.startsWith('Je sessie is verlopen')) reset();
+      throw new Error(data.error);
+    }
+    session={code:data.state.code,token:data.token};
+    try { sessionStorage.setItem('biosnake-live',JSON.stringify(session)); } catch {}
+    state=data.state;
+    $('notice').textContent='';
+    render();
+  } catch(error){
+    $('notice').textContent=error.name==='TypeError'||error.name==='TimeoutError'?'Verbinding onderbroken. We proberen opnieuw.':error.message;
+  } finally{
+    busy=false;
+    if(queued){
+      const next=queued;
+      queued=null;
+      send(next.action,next.extras);
+    }
+  }
+}
+
+function reset(){
+  session=null;
+  state=null;
+  queued=null;
+  try { sessionStorage.removeItem('biosnake-live'); } catch {}
+  render();
+}
+
+function draw(){
+  ctx.fillStyle='#101d19';
+  ctx.fillRect(0,0,720,450);
+  ctx.fillStyle='#294038';
+  for(let y=0;y<15;y++) for(let x=0;x<24;x++) ctx.fillRect(x*30+14,y*30+14,2,2);
+  if(state?.apple){
+    const {x,y}=state.apple;
+    ctx.fillStyle='#ff8293';
+    ctx.beginPath();
+    ctx.arc(x*30+15,y*30+16,9,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle='#c8fa79';
+    ctx.fillRect(x*30+15,y*30+3,6,3);
+  }
+  state?.players.forEach((player,index)=>player.snake.forEach(({x,y},segment)=>{
+    ctx.fillStyle=colors[index];
+    ctx.globalAlpha=segment?0.65:1;
+    ctx.beginPath();
+    ctx.roundRect(x*30+2,y*30+2,26,26,6);
+    ctx.fill();
+    if(!segment){
+      ctx.fillStyle='#15251d';
+      ctx.font='bold 14px system-ui';
+      ctx.fillText(String(index+1),x*30+11,y*30+20);
+    }
+  }));
+  ctx.globalAlpha=1;
+}
+
+function render(){
+  draw();
+  $('welcome').hidden=!!state;
+  $('room').hidden=!state;
+  $('message').hidden=!state||state.phase==='play'&&state.players.every(player=>player.connected);
+  const left=Math.max(0,180-Math.floor((state?.elapsed||0)/1000));
+  $('clock').textContent=Math.floor(left/60)+':'+String(left%60).padStart(2,'0');
+  $('scoreboard').replaceChildren(...(state?.players||[]).map((player,index)=>{
+    const card=document.createElement('div');
+    const title=document.createElement('strong');
+    title.textContent=(index+1)+' · '+player.name+(index===state.you?' (jij)':'');
+    title.style.color=colors[index];
+    const score=document.createElement('small');
+    score.textContent=player.score+' punten · '+player.lives+' levens';
+    card.append(title,score);
+    return card;
+  }));
+  if(!state){ renderKey=''; return; }
+  $('roomCode').textContent=state.code;
+  const quiz=state.quiz;
+  const key=JSON.stringify([state.phase,state.players.map(player=>[player.ready,player.connected]),quiz,state.winner]);
+  if(key===renderKey) return;
+  renderKey=key;
+  $('actions').replaceChildren();
+  const text=(tag,title,description)=>{
+    $('tag').textContent=tag;
+    $('title').textContent=title;
+    $('description').textContent=description||'';
+    $('description').hidden=!description;
+  };
+  const button=(label,click,primary=false)=>{
+    const element=document.createElement('button');
+    element.textContent=label;
+    if(primary) element.className='primary';
+    element.onclick=click;
+    $('actions').append(element);
+  };
+  if(state.phase==='lobby'){
+    const ready=state.players[state.you].ready;
+    text('Wachtkamer',state.players.length===1?'Nodig je tegenstander uit':'Spelers gevonden',
+      state.players.length===1?'Open deze webpagina op de andere Chromebook en voer de kamercode in.'
+        :ready?'Je bent klaar. Wacht tot de ander ook klaar is.':'Het duel begint zodra jullie allebei klaar zijn.');
+    if(!ready) button('Ik ben klaar',()=>send('ready'),true);
+  } else if(state.phase==='play'){
+    text('Verbinding','Even wachten','De speeltijd staat stil totdat je tegenstander weer verbonden is.');
+  } else if(state.phase==='done'){
+    text('Uitslag',state.players[state.winner].name+' wint!',state.reason);
+    button('Nieuw duel',reset,true);
+  } else if(state.phase==='review'){
+    text('Checkpoint','Goed antwoord: '+quiz.review.correct,quiz.review.results.map((correct,index)=>
+      state.players[index].name+(correct?' +25 punten':' · 0 punten')).join(' | '));
+  } else {
+    const label={collision:'Botsingsvraag',checkpoint:'Checkpoint',tie:'Beslissende vraag'}[quiz.kind];
+    if(quiz.waiting) text(label,'Wacht op je tegenstander','De speeltijd staat stil.');
+    else {
+      text(label,quiz.question.prompt,quiz.feedback||(quiz.kind==='checkpoint'?'Een goed antwoord levert 25 punten op.':''));
+      quiz.question.options.forEach((option,choice)=>button(option,()=>send('answer',{choice,id:quiz.question.id})));
+    }
+  }
+}
+
+$('lobby').addEventListener('submit',event=>{
+  event.preventDefault();
+  const action=event.submitter?.value||'create';
+  const code=$('code').value.trim();
+  if(action==='join'&&code.length!==6){ $('notice').textContent='Vul een kamercode van zes tekens in.'; return; }
+  send(action,{name:$('name').value,code});
+});
+document.addEventListener('keydown',event=>{
+  if(state?.phase!=='play'||event.altKey||event.ctrlKey||event.metaKey) return;
+  const direction=keys[event.key]||keys[event.key.toLowerCase()];
+  if(!direction) return;
+  event.preventDefault();
+  if(!event.repeat) send('turn',{direction});
+});
+render();
+if(session) send('state');
+setInterval(()=>{ if(session) send('state'); },100);
+</script>
+</html>
