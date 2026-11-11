@@ -166,7 +166,10 @@ function render(){
       state.players[index].name+(correct?' +25 punten':' · 0 punten')).join(' | '));
   } else {
     const label={collision:'Botsingsvraag',checkpoint:'Checkpoint',tie:'Beslissende vraag'}[quiz.kind];
-    if(quiz.waiting) text(label,'Wacht op je tegenstander','De speeltijd staat stil.');
+    if(quiz.waiting){
+      if(state.canMove) text(label,'Speel verder','Je tegenstander beantwoordt een vraag.');
+      else text(label,'Wacht op je tegenstander','De speeltijd staat stil.');
+    }
     else {
       text(label,quiz.question.prompt,quiz.feedback||(quiz.kind==='checkpoint'?'Een goed antwoord levert 25 punten op.':''));
       quiz.question.options.forEach((option,choice)=>button(option,()=>send('answer',{choice,id:quiz.question.id})));
@@ -182,11 +185,14 @@ $('lobby').addEventListener('submit',event=>{
   send(action,{name:$('name').value,code});
 });
 document.addEventListener('keydown',event=>{
-  if(state?.phase!=='play'||event.altKey||event.ctrlKey||event.metaKey) return;
+  if(!(state?.canMove??state?.phase==='play')||event.altKey||event.ctrlKey||event.metaKey) return;
   const direction=keys[event.key]||keys[event.key.toLowerCase()];
   if(!direction) return;
   event.preventDefault();
-  if(!event.repeat) send('turn',{direction});
+  if(event.repeat||!session) return;
+  fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({...session,action:'turn',direction}),
+    signal:AbortSignal.timeout(3500)}).catch(()=>{});
 });
 render();
 if(session) send('state');
