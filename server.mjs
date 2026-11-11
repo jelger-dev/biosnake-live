@@ -99,27 +99,24 @@ function respond(room, player, choice, id){
   if(room.phase!=='quiz'||!entry||entry.answer!==null||id!==entry.question.id) return;
   if(!Number.isInteger(choice)||choice<0||choice>=entry.question.options.length) return;
   entry.answer=choice===entry.question.correct;
-  if(quiz.kind==='collision'&&!entry.answer){
-    player.lives--;
-    if(player.lives){
+  if(quiz.kind==='collision'){
+    if(entry.answer){
+      spawn(room,player);
+      if(!room.apple||player.snake.some(cell=>same(cell,room.apple))) room.apple=apple(room);
+    } else {
+      player.lives--;
+      if(!player.lives){ end(room,1-player.index,'De andere speler heeft geen levens meer.'); return; }
       entry.question=question(room);
       entry.answer=null;
       entry.feedback='Onjuist. Je verliest één leven en krijgt een nieuwe vraag.';
-    } else if(quiz.entries.length===1){
-      end(room,1-player.index,'De andere speler heeft geen levens meer.');
     }
-  }
-  if(room.phase!=='quiz'||quiz.entries.some(item=>item.answer===null)) return;
-  if(quiz.kind==='collision'){
-    const alive=room.players.filter(item=>item.lives>0);
-    if(!alive.length){ decide(room); return; }
-    if(alive.length===1){ end(room,alive[0].index,'De andere speler heeft geen levens meer.'); return; }
-    quiz.entries.forEach(item=>spawn(room,room.players[item.index]));
-    if(!room.apple||room.players.some(item=>item.snake.some(cell=>same(cell,room.apple)))) room.apple=apple(room);
-    room.quiz=null;
-    room.phase='play';
+    if(quiz.entries.every(item=>item.answer!==null)){
+      room.quiz=null;
+      room.phase='play';
+    }
     return;
   }
+  if(quiz.entries.some(item=>item.answer===null)) return;
   if(quiz.kind==='tie'){
     const correct=quiz.entries.filter(item=>item.answer);
     if(correct.length===1) end(room,correct[0].index,'Gewonnen met de beslissende biologievraag.');
@@ -131,18 +128,28 @@ function respond(room, player, choice, id){
   room.resumeAt=Date.now()+3500;
 }
 
+function canMove(room, player){
+  return room.phase==='play'||(room.phase==='quiz'&&room.quiz.kind==='collision'
+    &&!room.quiz.entries.some(entry=>entry.index===player.index&&entry.answer===null));
+}
+
 function step(room){
   if(room.phase==='review'&&Date.now()>=room.resumeAt){
     room.quiz=null;
     room.phase='play';
     return;
   }
-  if(room.phase!=='play') return;
-  if(room.players.some(player=>Date.now()-player.lastSeen>5000)) return;
+  const moving=room.players.map(player=>canMove(room,player));
+  if(!moving.some(Boolean)||room.players.some(player=>Date.now()-player.lastSeen>5000)) return;
   room.elapsed+=TICK;
   if(room.elapsed>=180000){ decide(room); return; }
-  if(room.elapsed%45000===0){ ask(room,'checkpoint',[0,1]); return; }
-  const moves=room.players.map(player=>{
+  if(room.phase==='play'&&room.elapsed>=room.nextCheckpoint){
+    room.nextCheckpoint+=45000;
+    ask(room,'checkpoint',[0,1]);
+    return;
+  }
+  const moves=room.players.map((player,index)=>{
+    if(!moving[index]) return {head:null,eats:false,body:player.snake};
     if(player.next) player.direction=player.next;
     player.next=null;
     const [dx,dy]=player.direction;
@@ -151,26 +158,34 @@ function step(room){
     return {head,eats,body:eats?player.snake:player.snake.slice(0,-1)};
   });
   const hit=moves.flatMap(({head},index)=>{
+    if(!head) return [];
     const other=1-index;
     const outside=head.x<0||head.x>=WIDTH||head.y<0||head.y>=HEIGHT;
     return outside||same(head,moves[other].head)||same(head,room.players[other].snake[0])
       ||moves.some(move=>move.body.some(cell=>same(cell,head)))?[index]:[];
   });
-  if(hit.length){ ask(room,'collision',hit); return; }
   moves.forEach((move,index)=>{
+    if(!moving[index]||hit.includes(index)) return;
     const player=room.players[index];
     player.snake=[move.head,...move.body];
     if(move.eats) points(player,10);
   });
-  if(moves.some(move=>move.eats)) room.apple=apple(room);
-  if(!room.apple) decide(room);
+  if(moves.some((move,index)=>move.eats&&!hit.includes(index))) room.apple=apple(room);
+  if(!room.apple){ decide(room); return; }
+  if(hit.length){
+    if(room.phase==='play') ask(room,'collision',hit);
+    else for(const index of hit){
+      room.quiz.entries=room.quiz.entries.filter(entry=>entry.index!==index);
+      room.quiz.entries.push({index,question:question(room),answer:null,feedback:''});
+    }
+  }
 }
 
 function view(room, player){
   const quiz=room.quiz;
   const mine=quiz?.entries.find(entry=>entry.index===player.index);
   return {code:room.code,you:player.index,phase:room.phase,elapsed:room.elapsed,apple:room.apple,
-    winner:room.winner,reason:room.reason,
+    winner:room.winner,reason:room.reason,canMove:canMove(room,player),
     players:room.players.map(({name,score,lives,snake,ready,lastSeen})=>({name,score,lives,snake,ready,connected:Date.now()-lastSeen<=5000})),
     quiz:quiz?{kind:quiz.kind,waiting:!mine||mine.answer!==null,
       feedback:mine?.feedback,
@@ -210,7 +225,7 @@ const server=createServer(async (request,response)=>{
         if(rooms.size>=200) fail('De server heeft te veel kamers. Probeer het later opnieuw.');
         let generated;
         do { generated=randomBytes(3).toString('hex').toUpperCase(); } while(rooms.has(generated));
-        room={code:generated,players:[],phase:'lobby',elapsed:0,deck:[],questionId:0,touched:Date.now()};
+        room={code:generated,players:[],phase:'lobby',elapsed:0,nextCheckpoint:45000,deck:[],questionId:0,touched:Date.now()};
         rooms.set(generated,room);
       } else if(!room||room.phase!=='lobby'||room.players.length>=2) fail('Deze kamer is vol of bestaat niet.');
       player=addPlayer(room,name);
@@ -225,7 +240,7 @@ const server=createServer(async (request,response)=>{
           room.phase='play';
         }
       }
-      if(data.action==='turn'&&room.phase==='play'&&Object.hasOwn(directions,data.direction)){
+      if(data.action==='turn'&&canMove(room,player)&&Object.hasOwn(directions,data.direction)){
         const vector=directions[data.direction];
         if(!player.next&&vector[0]*player.direction[0]+vector[1]*player.direction[1]===0) player.next=vector;
       }
